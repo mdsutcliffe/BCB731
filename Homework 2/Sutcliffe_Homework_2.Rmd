@@ -1,0 +1,137 @@
+---
+title: "BCB 724 Homework 2"
+author: "Matthew Sutcliffe"
+date: '`r Sys.Date()`'
+output: pdf_document
+geometry: "a4paper, margin=1cm"
+---
+
+Load libraries and data
+```{r, results='hide', message=FALSE}
+library(caret)
+library(glmnet)
+library(pROC)
+
+set.seed(0)
+
+metadata <- read.csv(file = "poore-2020-metadata-subset.csv", stringsAsFactors = TRUE)[, -1]
+```
+
+One-hot encode the 6 feature columns
+```{r}
+binary_features <- model.matrix(object = formula( ~ . - 1), data = metadata[, -1])
+
+dim(binary_features)
+```
+
+Combine with target "Ovarian Serous Cystadenocarcinoma"
+```{r}
+x <- cbind(data.frame(
+    "OSC" = as.numeric(metadata$disease_type == "Ovarian Serous Cystadenocarcinoma")
+    ),binary_features)
+```
+
+50/50 train/test split
+```{r}
+trainIndex <- createDataPartition(y = x$OSC, p = 0.5, list = FALSE, times = 1)
+
+x_train <- x[ trainIndex, ]
+x_test  <- x[-trainIndex, ]
+```
+
+# Model Fitting
+
+Fit a multivariate logistic regression model with LASSO penalty.
+```{r}
+fit <- cv.glmnet(x = as.matrix(x_train[, -1]),
+                 y = as.matrix(x_train[,  1, drop = FALSE]),
+                 family = "binomial", alpha = 1)
+plot(fit)
+```
+
+What features does it select?
+```{r}
+selected_features <- as.matrix(predict(object = fit, s = "lambda.min", type = "coefficients"))[, 1]
+selected_features <- selected_features[selected_features != 0] |> sort(decreasing = TRUE)
+
+head(selected_features)
+```
+There are 54 features selected. Interestingly, one of the top features include "tissue_source_site_label = Gynecologic Oncology Group", which seems highly relevant for predicting ovarian cancer.
+
+
+Let's look at the predicted probabilities for the training set and testing set
+```{r, fig.width=8, fig.height=5}
+prediction_train <- predict(object = fit,
+                            newx = as.matrix(x_train[, -1]),
+                            s = "lambda.min",
+                            type = "response")[, 1]
+prediction_test  <- predict(object = fit,
+                            newx = as.matrix(x_test[, -1]),
+                            s = "lambda.min",
+                            type = "response")[, 1]
+
+par(mfrow = c(1, 2))
+hist(prediction_train, las = 1)
+hist(prediction_test, las = 1)
+```
+
+All the probabilities are very close to 0 or 1, so regardless of whether the model is correct, it seems very confident in the predictions.
+
+Calculate ROC curves
+```{r, results='hide', message=FALSE}
+x_train$prediction <- prediction_train
+x_test$prediction <- prediction_test
+
+roc_train <- roc(OSC ~ prediction, data = x_train)
+roc_test <- roc(OSC ~ prediction, data = x_test)
+
+auc_train <- auc(roc_train) |> as.numeric()
+auc_test <- auc(roc_test) |> as.numeric()
+```
+# Results
+
+```{r, echo=FALSE, fig.width=8, fig.height=5}
+par(mfrow = c(1, 2), pty="s")
+plot(x = NA, y = NA,
+     xlim = c(0, 1), ylim = c(0, 1),
+     xlab = "1 - Specificity", ylab = "Sensitivity",
+     axes = FALSE, xaxs = "i", yaxs = "i")
+axis(side = 1)
+axis(side = 2, las = 1)
+par(xpd = FALSE)
+abline(a = 0, b = 1, col = "gray")
+par(xpd = TRUE)
+plot_train_x <- 1 - roc_train$specificities
+plot_train_y <- roc_train$sensitivities
+lines(x = plot_train_x, y = plot_train_y,
+      lwd = 4)
+plot_test_x <- 1 - roc_test$specificities
+plot_test_y <- roc_test$sensitivities
+lines(x = plot_test_x, y = plot_test_y,
+      lwd = 4, col = "red")
+legend("bottomright", legend = c("train", "test"), border = NA, lty = c(1, 1), col = c("black", "red"), lwd = 4)
+xmax <- 0.2
+ymin <- 0.8
+rect(0, ymin, xmax, 1, lty = "dotted")
+
+plot(x = NA, y = NA,
+     xlim = c(0, xmax), ylim = c(ymin, 1),
+     xlab = "1 - Specificity", ylab = "Sensitivity",
+     axes = FALSE, xaxs = "i", main = "zoom in")
+axis(side = 1)
+axis(side = 2, las = 1)
+par(xpd = TRUE)
+
+plot_train_x <- 1 - roc_train$specificities
+plot_train_y <- roc_train$sensitivities
+lines(x = plot_train_x[plot_train_x < xmax & plot_train_y > ymin],
+      y = plot_train_y[plot_train_x < xmax & plot_train_y > ymin],
+      lwd = 4)
+plot_test_x <- 1 - roc_test$specificities
+plot_test_y <- roc_test$sensitivities
+lines(x = plot_test_x[plot_test_x < xmax & plot_test_y > ymin],
+      y = plot_test_y[plot_test_x < xmax & plot_test_y > ymin],
+      lwd = 4, col = "red")
+text(x = 0.07, y = 0.9, paste("AUC_train =", round(auc_train, 3),"\n"), col = "black", adj = c(0, 0))
+text(x = 0.07, y = 0.9, paste("AUC_test =", round(auc_test, 3),"\n"), col = "red", adj = c(0, 1))
+```
